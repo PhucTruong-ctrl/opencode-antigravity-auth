@@ -686,6 +686,7 @@ export class AccountManager {
   markAccountCoolingDown(account: ManagedAccount, cooldownMs: number, reason: CooldownReason): void {
     account.coolingDownUntil = nowMs() + cooldownMs;
     account.cooldownReason = reason;
+    this.requestSaveToDisk();
   }
 
   isAccountCoolingDown(account: ManagedAccount): boolean {
