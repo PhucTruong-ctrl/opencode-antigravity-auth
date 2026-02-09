@@ -169,9 +169,11 @@ export function resolveModelWithTier(requestedModel: string, options: ModelResol
   const isImageModel = IMAGE_GENERATION_MODELS.test(modelWithoutQuota);
   const isClaudeModel = modelWithoutQuota.toLowerCase().includes("claude");
   
-  // All models default to Antigravity quota unless cli_first is enabled
+  // All models default to Antigravity quota unless cli_first is enabled or model is gemini-3-pro-preview
+  // gemini-3-pro-preview should always use gemini-cli quota (it's a CLI-specific model)
   // Fallback to gemini-cli happens at the account rotation level when Antigravity is exhausted
-  const preferGeminiCli = options.cli_first === true && !isAntigravity && !isImageModel && !isClaudeModel;
+  const isGemini3ProPreview = modelWithoutQuota === "gemini-3-pro-preview";
+  const preferGeminiCli = (options.cli_first === true || isGemini3ProPreview) && !isAntigravity && !isImageModel && !isClaudeModel;
   const quotaPreference = preferGeminiCli ? "gemini-cli" as const : "antigravity" as const;
   const explicitQuota = isAntigravity || isImageModel;
 

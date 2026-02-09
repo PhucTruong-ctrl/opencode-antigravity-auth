@@ -27,12 +27,12 @@ describe("resolveModelWithTier", () => {
   });
 
   describe("Gemini 3 preview models (Issue #115)", () => {
-    it("gemini-3-pro-preview gets default thinkingLevel 'low' with antigravity quota", () => {
+    it("gemini-3-pro-preview gets default thinkingLevel 'low' with gemini-cli quota", () => {
       const result = resolveModelWithTier("gemini-3-pro-preview");
       expect(result.actualModel).toBe("gemini-3-pro-preview");
       expect(result.thinkingLevel).toBe("low");
-      // All Gemini models now default to antigravity
-      expect(result.quotaPreference).toBe("antigravity");
+      // gemini-3-pro-preview is a CLI-specific model, so it defaults to gemini-cli quota
+      expect(result.quotaPreference).toBe("gemini-cli");
     });
   });
 
