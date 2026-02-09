@@ -1,5 +1,5 @@
 import { formatRefreshParts, parseRefreshParts } from "./auth";
-import { loadAccounts, saveAccounts, type AccountStorageV3, type AccountMetadataV3, type RateLimitStateV3, type ModelFamily, type HeaderStyle, type CooldownReason } from "./storage";
+import { loadAccounts, saveAccounts, type AccountStorageV3, type AccountMetadataV3, type RateLimitStateV3, type ModelFamily, type HeaderStyle, type CooldownReason, type CircuitState, type AutoDisableReason } from "./storage";
 import type { OAuthAuthDetails, RefreshParts } from "./types";
 import type { AccountSelectionStrategy } from "./config/schema";
 import { getHealthTracker, getTokenTracker, selectHybridAccount, type AccountWithMetrics } from "./rotation";
@@ -9,7 +9,7 @@ import { getModelFamily } from "./transform/model-resolver";
 import { debugLogToFile } from "./debug";
 import { ANTIGRAVITY_VERSION } from "../constants";
 
-export type { ModelFamily, HeaderStyle, CooldownReason } from "./storage";
+export type { ModelFamily, HeaderStyle, CooldownReason, CircuitState, AutoDisableReason } from "./storage";
 export type { AccountSelectionStrategy } from "./config/schema";
 
 /**
@@ -48,6 +48,18 @@ const MODEL_CAPACITY_EXHAUSTED_JITTER_MAX = 30_000; // ±15s jitter range
 const SERVER_ERROR_BACKOFF = 20_000;
 const UNKNOWN_BACKOFF = 60_000;
 const MIN_BACKOFF_MS = 2_000;
+
+// Progressive cooldown backoffs per reason (circuit breaker pattern)
+// Each successive cooldown for the same reason uses the next duration in the array
+const PROGRESSIVE_COOLDOWN_MS: Record<CooldownReason, readonly number[]> = {
+  "validation-required": [10 * 60_000, 60 * 60_000, 6 * 60 * 60_000, 24 * 60 * 60_000], // 10m, 1h, 6h, 24h
+  "auth-failure": [5 * 60_000, 30 * 60_000, 2 * 60 * 60_000, 8 * 60 * 60_000],          // 5m, 30m, 2h, 8h
+  "network-error": [30_000, 2 * 60_000, 10 * 60_000, 30 * 60_000],                      // 30s, 2m, 10m, 30m
+  "project-error": [5 * 60_000, 30 * 60_000, 2 * 60 * 60_000],                          // 5m, 30m, 2h
+  "quota-exhausted": [60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000],               // 1m, 5m, 30m, 2h
+};
+const MAX_COOLDOWN_COUNT = 10;
+const AUTO_DISABLE_QUOTA_THRESHOLD = 0.02; // 2% remaining triggers auto-disable
 
 /**
  * Generate a random jitter value for backoff timing.
@@ -163,6 +175,16 @@ export interface ManagedAccount {
   /** Cached quota data from last checkAccountsQuota() call */
   cachedQuota?: Partial<Record<QuotaGroup, QuotaGroupSummary>>;
   cachedQuotaUpdatedAt?: number;
+  // Circuit breaker fields
+  circuitState?: CircuitState;
+  consecutiveCooldownCount?: Partial<Record<CooldownReason, number>>;
+  isProbing?: boolean; // In-memory only: true during half-open probe
+  // Auto-disable fields
+  autoDisabledUntil?: number;
+  autoDisableReason?: AutoDisableReason;
+  // Persisted health fields
+  healthScore?: number;
+  lastHealthUpdate?: number;
 }
 
 function nowMs(): number {
@@ -376,6 +398,12 @@ export class AccountManager {
               : generateFingerprint(),
             cachedQuota: acc.cachedQuota as Partial<Record<QuotaGroup, QuotaGroupSummary>> | undefined,
             cachedQuotaUpdatedAt: acc.cachedQuotaUpdatedAt,
+            circuitState: acc.circuitState,
+            consecutiveCooldownCount: acc.consecutiveCooldownCount,
+            healthScore: acc.healthScore,
+            lastHealthUpdate: acc.lastHealthUpdate,
+            autoDisabledUntil: acc.autoDisabledUntil,
+            autoDisableReason: acc.autoDisableReason,
           };
         })
         .filter((a): a is ManagedAccount => a !== null);
@@ -683,9 +711,27 @@ export class AccountManager {
     return minWaitMs > 0 && minWaitMs <= 2_000;
   }
 
-  markAccountCoolingDown(account: ManagedAccount, cooldownMs: number, reason: CooldownReason): void {
-    account.coolingDownUntil = nowMs() + cooldownMs;
+  markAccountCoolingDown(account: ManagedAccount, reason: CooldownReason, forceDurationMs?: number): void {
+    const now = nowMs();
+    const counts = account.consecutiveCooldownCount ?? {};
+    const currentCount = Math.min((counts[reason] ?? 0), MAX_COOLDOWN_COUNT);
+    
+    let cooldownMs: number;
+    if (forceDurationMs !== undefined) {
+      cooldownMs = forceDurationMs;
+    } else {
+      const backoffs = PROGRESSIVE_COOLDOWN_MS[reason] ?? PROGRESSIVE_COOLDOWN_MS["network-error"];
+      const index = Math.min(currentCount, backoffs.length - 1);
+      cooldownMs = backoffs[index] ?? 60_000;
+    }
+    
+    account.coolingDownUntil = now + cooldownMs;
     account.cooldownReason = reason;
+    account.circuitState = "open";
+    
+    counts[reason] = currentCount + 1;
+    account.consecutiveCooldownCount = counts;
+    
     this.requestSaveToDisk();
   }
 
@@ -694,7 +740,12 @@ export class AccountManager {
       return false;
     }
     if (nowMs() >= account.coolingDownUntil) {
-      this.clearAccountCooldown(account);
+      if (account.circuitState === "open") {
+        account.circuitState = "half-open";
+        delete account.coolingDownUntil;
+      } else {
+        this.clearAccountCooldown(account);
+      }
       return false;
     }
     return true;
@@ -707,6 +758,47 @@ export class AccountManager {
 
   getAccountCooldownReason(account: ManagedAccount): CooldownReason | undefined {
     return this.isAccountCoolingDown(account) ? account.cooldownReason : undefined;
+  }
+
+  clearCooldownCountForReason(account: ManagedAccount, reason: CooldownReason): void {
+    if (account.consecutiveCooldownCount) {
+      delete account.consecutiveCooldownCount[reason];
+    }
+    if (account.circuitState === "half-open" || account.circuitState === "open") {
+      account.circuitState = "closed";
+    }
+    account.isProbing = false;
+  }
+
+  getCircuitState(account: ManagedAccount): CircuitState {
+    return account.circuitState ?? "closed";
+  }
+
+  startProbe(account: ManagedAccount): boolean {
+    if (account.circuitState !== "half-open" || account.isProbing) {
+      return false;
+    }
+    account.isProbing = true;
+    return true;
+  }
+
+  handleProbeResult(account: ManagedAccount, success: boolean, reason?: CooldownReason): void {
+    if (!account.isProbing) {
+      return;
+    }
+    account.isProbing = false;
+    
+    if (success) {
+      account.circuitState = "closed";
+      if (reason) {
+        this.clearCooldownCountForReason(account, reason);
+      }
+    } else {
+      if (reason) {
+        this.markAccountCoolingDown(account, reason);
+      }
+    }
+    this.requestSaveToDisk();
   }
 
   markTouchedForQuota(account: ManagedAccount, quotaKey: string): void {
@@ -956,6 +1048,12 @@ export class AccountManager {
         fingerprintHistory: a.fingerprintHistory?.length ? a.fingerprintHistory : undefined,
         cachedQuota: a.cachedQuota && Object.keys(a.cachedQuota).length > 0 ? a.cachedQuota : undefined,
         cachedQuotaUpdatedAt: a.cachedQuotaUpdatedAt,
+        circuitState: a.circuitState !== "closed" ? a.circuitState : undefined,
+        consecutiveCooldownCount: a.consecutiveCooldownCount && Object.keys(a.consecutiveCooldownCount).length > 0 ? a.consecutiveCooldownCount : undefined,
+        healthScore: a.healthScore,
+        lastHealthUpdate: a.lastHealthUpdate,
+        autoDisabledUntil: a.autoDisabledUntil,
+        autoDisableReason: a.autoDisableReason,
       })),
       activeIndex: claudeIndex,
       activeIndexByFamily: {
@@ -1182,5 +1280,75 @@ export class AccountManager {
     const minWait = Math.min(...waitTimes);
     // Treat 0 as stale cache (resetTime in the past) → fail-open to avoid spin loop
     return minWait === 0 ? null : minWait;
+  }
+
+  checkAndAutoDisableForQuota(account: ManagedAccount, family: ModelFamily, model?: string | null): boolean {
+    if (!account.cachedQuota) return false;
+    
+    const quotaGroup = resolveQuotaGroup(family, model);
+    const groupData = account.cachedQuota[quotaGroup];
+    if (!groupData?.remainingFraction) return false;
+    
+    if (groupData.remainingFraction <= AUTO_DISABLE_QUOTA_THRESHOLD) {
+      const resetTime = groupData.resetTime ? Date.parse(groupData.resetTime) : null;
+      const disableUntil = resetTime && Number.isFinite(resetTime) ? resetTime : nowMs() + 60 * 60 * 1000;
+      
+      account.autoDisabledUntil = disableUntil;
+      account.autoDisableReason = "quota-exhausted";
+      this.requestSaveToDisk();
+      
+      const accountLabel = account.email || `Account ${account.index + 1}`;
+      debugLogToFile(`[AutoDisable] ${accountLabel}: quota at ${(groupData.remainingFraction * 100).toFixed(1)}%, disabled until ${new Date(disableUntil).toISOString()}`);
+      
+      return true;
+    }
+    return false;
+  }
+
+  checkAutoDisableExpiry(account: ManagedAccount): boolean {
+    if (account.autoDisabledUntil === undefined) return false;
+    
+    if (nowMs() >= account.autoDisabledUntil) {
+      delete account.autoDisabledUntil;
+      delete account.autoDisableReason;
+      this.requestSaveToDisk();
+      
+      const accountLabel = account.email || `Account ${account.index + 1}`;
+      debugLogToFile(`[AutoDisable] ${accountLabel}: auto-disable expired, re-enabled`);
+      
+      return true;
+    }
+    return false;
+  }
+
+  isAccountAutoDisabled(account: ManagedAccount): boolean {
+    this.checkAutoDisableExpiry(account);
+    return account.autoDisabledUntil !== undefined && nowMs() < account.autoDisabledUntil;
+  }
+
+  getAccountHealthLabel(account: ManagedAccount): "excellent" | "good" | "degraded" | "critical" {
+    const score = account.healthScore ?? 100;
+    if (score >= 90) return "excellent";
+    if (score >= 70) return "good";
+    if (score >= 50) return "degraded";
+    return "critical";
+  }
+
+  getAccountsSnapshotWithHealth(): Array<ManagedAccount & { healthLabel: string; circuitStateLabel: string }> {
+    return this.accounts.map((a) => ({
+      ...a,
+      parts: { ...a.parts },
+      rateLimitResetTimes: { ...a.rateLimitResetTimes },
+      healthLabel: this.getAccountHealthLabel(a),
+      circuitStateLabel: a.circuitState ?? "closed",
+    }));
+  }
+
+  updateAccountHealth(accountIndex: number, score: number): void {
+    const account = this.accounts[accountIndex];
+    if (account) {
+      account.healthScore = Math.max(0, Math.min(100, score));
+      account.lastHealthUpdate = nowMs();
+    }
   }
 }

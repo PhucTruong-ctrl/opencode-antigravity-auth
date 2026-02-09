@@ -556,7 +556,7 @@ describe("AccountManager", () => {
       const manager = new AccountManager(undefined, stored);
       const account = manager.getCurrentOrNextForFamily("claude");
 
-      manager.markAccountCoolingDown(account!, 30000, "auth-failure");
+      manager.markAccountCoolingDown(account!, "auth-failure", 30000);
 
       expect(manager.isAccountCoolingDown(account!)).toBe(true);
     });
@@ -576,7 +576,7 @@ describe("AccountManager", () => {
       const manager = new AccountManager(undefined, stored);
       const account = manager.getCurrentOrNextForFamily("claude");
 
-      manager.markAccountCoolingDown(account!, 30000, "network-error");
+      manager.markAccountCoolingDown(account!, "network-error", 30000);
 
       expect(manager.isAccountCoolingDown(account!)).toBe(true);
 
@@ -597,7 +597,7 @@ describe("AccountManager", () => {
       const manager = new AccountManager(undefined, stored);
       const account = manager.getCurrentOrNextForFamily("claude");
 
-      manager.markAccountCoolingDown(account!, 30000, "auth-failure");
+      manager.markAccountCoolingDown(account!, "auth-failure", 30000);
       expect(manager.isAccountCoolingDown(account!)).toBe(true);
 
       manager.clearAccountCooldown(account!);
@@ -617,7 +617,7 @@ describe("AccountManager", () => {
       const manager = new AccountManager(undefined, stored);
       const account1 = manager.getCurrentOrNextForFamily("claude");
 
-      manager.markAccountCoolingDown(account1!, 30000, "project-error");
+      manager.markAccountCoolingDown(account1!, "project-error", 30000);
 
       const next = manager.getCurrentOrNextForFamily("claude");
       expect(next?.parts.refreshToken).toBe("r2");
@@ -635,7 +635,7 @@ describe("AccountManager", () => {
       const manager = new AccountManager(undefined, stored);
       const account = manager.getCurrentOrNextForFamily("gemini");
 
-      manager.markAccountCoolingDown(account!, 30000, "auth-failure");
+      manager.markAccountCoolingDown(account!, "auth-failure", 30000);
 
       expect(manager.isAccountCoolingDown(account!)).toBe(true);
       expect(manager.isRateLimitedForHeaderStyle(account!, "gemini", "antigravity")).toBe(false);
@@ -832,7 +832,7 @@ describe("AccountManager", () => {
 
         const manager = new AccountManager(undefined, stored);
         const accounts = manager.getAccounts();
-        manager.markAccountCoolingDown(accounts[0]!, 60000, "auth-failure");
+        manager.markAccountCoolingDown(accounts[0]!, "auth-failure", 60000);
 
         const selected = manager.getCurrentOrNextForFamily("claude", null, "hybrid");
         expect(selected?.index).toBe(1);

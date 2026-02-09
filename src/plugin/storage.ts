@@ -177,7 +177,13 @@ export interface AccountStorage {
   activeIndex: number;
 }
 
-export type CooldownReason = "auth-failure" | "network-error" | "project-error" | "validation-required";
+export type CooldownReason = "auth-failure" | "network-error" | "project-error" | "validation-required" | "quota-exhausted";
+
+/** Circuit breaker state for account availability */
+export type CircuitState = "closed" | "open" | "half-open";
+
+/** Reason for automatic account disabling */
+export type AutoDisableReason = "quota-exhausted" | "health-degraded";
 
 export interface AccountMetadataV3 {
   email?: string;
@@ -196,6 +202,18 @@ export interface AccountMetadataV3 {
   /** Cached soft quota data */
   cachedQuota?: Record<string, { remainingFraction?: number; resetTime?: string; modelCount: number }>;
   cachedQuotaUpdatedAt?: number;
+  /** Circuit breaker state */
+  circuitState?: CircuitState;
+  /** Consecutive cooldown count per reason for progressive backoff */
+  consecutiveCooldownCount?: Partial<Record<CooldownReason, number>>;
+  /** Persisted health score (0-100) */
+  healthScore?: number;
+  /** Timestamp of last health score update */
+  lastHealthUpdate?: number;
+  /** Auto-disabled until timestamp (for quota protection) */
+  autoDisabledUntil?: number;
+  /** Reason for auto-disable */
+  autoDisableReason?: AutoDisableReason;
 }
 
 export interface AccountStorageV3 {

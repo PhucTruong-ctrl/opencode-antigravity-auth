@@ -1298,7 +1298,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
                   getHealthTracker().recordFailure(account.index);
                   lastError = new Error("Antigravity token refresh failed");
                   if (shouldCooldown) {
-                    accountManager.markAccountCoolingDown(account, cooldownMs, "auth-failure");
+                    accountManager.markAccountCoolingDown(account, "auth-failure", cooldownMs);
                     accountManager.markRateLimited(account, cooldownMs, family, "antigravity", model);
                     pushDebug(`token-refresh-failed: cooldown ${cooldownMs}ms after ${failures} failures`);
                   }
@@ -1347,7 +1347,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
                 getHealthTracker().recordFailure(account.index);
                 lastError = error instanceof Error ? error : new Error(String(error));
                 if (shouldCooldown) {
-                  accountManager.markAccountCoolingDown(account, cooldownMs, "auth-failure");
+                  accountManager.markAccountCoolingDown(account, "auth-failure", cooldownMs);
                   accountManager.markRateLimited(account, cooldownMs, family, "antigravity", model);
                   pushDebug(`token-refresh-error: cooldown ${cooldownMs}ms after ${failures} failures`);
                 }
@@ -1373,7 +1373,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
               getHealthTracker().recordFailure(account.index);
               lastError = error instanceof Error ? error : new Error(String(error));
               if (shouldCooldown) {
-                accountManager.markAccountCoolingDown(account, cooldownMs, "project-error");
+                accountManager.markAccountCoolingDown(account, "project-error", cooldownMs);
                 accountManager.markRateLimited(account, cooldownMs, family, "antigravity", model);
                 pushDebug(`project-context-error: cooldown ${cooldownMs}ms after ${failures} failures`);
               }
@@ -1855,8 +1855,10 @@ export const createAntigravityPlugin = (providerId: string) => async (
                   const body403 = await extractRetryInfoFromBody(response);
                   
                   if (body403.reason === "VALIDATION_REQUIRED") {
-                    const cooldownMs = 10 * 60 * 1000; // 10 minutes - give user time to verify
-                    accountManager.markAccountCoolingDown(account, cooldownMs, "validation-required");
+                    // Let progressive cooldown handle duration - validation-required starts at 10m
+                    accountManager.markAccountCoolingDown(account, "validation-required");
+                    // Also mark rate-limited to prevent immediate reuse before cooldown check
+                    const cooldownMs = 10 * 60 * 1000; // Minimum duration for rate limit tracking
                     accountManager.markRateLimited(account, cooldownMs, family, headerStyle, model);
                     
                     const accountLabel = account.email || `Account ${account.index + 1}`;
@@ -2071,7 +2073,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
                 const { failures, shouldCooldown, cooldownMs } = trackAccountFailure(account.index);
                 lastError = error instanceof Error ? error : new Error(String(error));
                 if (shouldCooldown) {
-                  accountManager.markAccountCoolingDown(account, cooldownMs, "network-error");
+                  accountManager.markAccountCoolingDown(account, "network-error", cooldownMs);
                   accountManager.markRateLimited(account, cooldownMs, family, headerStyle, model);
                   pushDebug(`endpoint-error: cooldown ${cooldownMs}ms after ${failures} failures`);
                 }

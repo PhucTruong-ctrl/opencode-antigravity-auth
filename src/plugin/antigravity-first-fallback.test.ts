@@ -114,7 +114,7 @@ describe("Antigravity-first fallback", () => {
       // Mark account 0's antigravity as rate-limited
       manager.markRateLimited(accounts[0]!, 60000, "gemini", "antigravity");
       // Mark account 1 as cooling down
-      manager.markAccountCoolingDown(accounts[1]!, 60000, "auth-failure");
+      manager.markAccountCoolingDown(accounts[1]!, "auth-failure", 60000);
 
       const hasOther = manager.hasOtherAccountWithAntigravityAvailable(
         accounts[0]!.index,
