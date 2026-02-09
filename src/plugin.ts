@@ -1850,6 +1850,42 @@ export const createAntigravityPlugin = (providerId: string) => async (
                   }
                 }
 
+                // Handle 403 VALIDATION_REQUIRED - account needs Google verification
+                if (response.status === 403) {
+                  const body403 = await extractRetryInfoFromBody(response);
+                  
+                  if (body403.reason === "VALIDATION_REQUIRED") {
+                    const cooldownMs = 10 * 60 * 1000; // 10 minutes - give user time to verify
+                    accountManager.markAccountCoolingDown(account, cooldownMs, "validation-required");
+                    accountManager.markRateLimited(account, cooldownMs, family, headerStyle, model);
+                    
+                    const accountLabel = account.email || `Account ${account.index + 1}`;
+                    await showToast(
+                      `${accountLabel} requires Google verification. Visit accounts.google.com to verify, then retry. Switching accounts...`,
+                      "warning"
+                    );
+                    pushDebug(`validation-required: account=${account.index} cooldown=${cooldownMs}ms`);
+                    
+                    getHealthTracker().recordFailure(account.index);
+                    
+                    lastFailure = {
+                      response,
+                      streaming: prepared.streaming,
+                      debugContext,
+                      requestedModel: prepared.requestedModel,
+                      projectId: prepared.projectId,
+                      endpoint: prepared.endpoint,
+                      effectiveModel: prepared.effectiveModel,
+                      sessionId: prepared.sessionId,
+                      toolDebugMissing: prepared.toolDebugMissing,
+                      toolDebugSummary: prepared.toolDebugSummary,
+                      toolDebugPayload: prepared.toolDebugPayload,
+                    };
+                    shouldSwitchAccount = true;
+                    break;
+                  }
+                }
+
                 // Success - reset rate limit backoff state for this quota
                 const quotaKey = headerStyleToQuotaKey(headerStyle, family);
                 resetRateLimitState(account.index, quotaKey);
