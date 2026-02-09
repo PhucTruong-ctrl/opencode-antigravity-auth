@@ -529,7 +529,9 @@ export class AccountManager {
             index: acc.index,
             lastUsed: acc.lastUsed,
             healthScore: healthTracker.getScore(acc.index),
-            isRateLimited: isRateLimitedForFamily(acc, family, model) || 
+            // Use headerStyle-specific rate limit check, not family-wide check
+            // This ensures gemini-cli requests aren't blocked by antigravity limits and vice versa
+            isRateLimited: isRateLimitedForHeaderStyle(acc, family, headerStyle, model) || 
                           isOverSoftQuotaThreshold(acc, family, softQuotaThresholdPercent, softQuotaCacheTtlMs, model),
             isCoolingDown: this.isAccountCoolingDown(acc),
           };
